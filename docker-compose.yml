@@ -11,6 +11,6 @@ services:
       - ./out:/out
       - ./build-sysbench-android.sh:/work/build-sysbench-android.sh:ro
     environment:
-      - JOBS=4
+      - JOBS=
       - OUT_DIR=/out
     command: ["/bin/bash", "/work/build-sysbench-android.sh"]

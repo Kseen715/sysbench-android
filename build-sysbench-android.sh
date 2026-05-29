@@ -63,10 +63,14 @@ build_one() {
   local tc_dir="${TOOLCHAIN_ROOT}/${name}"
   local bdir="${BUILD_ROOT}/${name}"
   local extra_cflags=""
-  local ck_configure_flags="--profile=arm"
+  local ck_configure_flags=""
 
   if [[ "${host}" == "aarch64-linux-android" ]]; then
     ck_configure_flags="--profile=aarch64"
+  elif [[ "${host}" == "x86_64-linux-android" ]]; then
+    ck_configure_flags="--profile=x86_64"
+  elif [[ "${host}" == "i686-linux-android" ]]; then
+    ck_configure_flags="--profile=x86"
   elif [[ "${name}" == "armv5" ]]; then
     # armv5te lacks ldrex/strex (ARMv6+ only); combine arm profile (avoids host
     # x86_64 profile and its -m64 flag) with --use-cc-builtins (uses GCC
@@ -77,6 +81,8 @@ build_one() {
     # Force CK to aarch64 so it does not auto-detect host x86_64 and inject
     # -m64 / -D__x86_64__ into target compilation.
     ck_configure_flags="--profile=aarch64"
+  else
+    ck_configure_flags="--profile=arm"
   fi
 
   # CK static-only build avoids install-so/libck.so failures while sysbench
@@ -106,8 +112,8 @@ build_one() {
   export STRIP="${tc_dir}/bin/${host}-strip"
 
   # LuaJIT's host tools (buildvm/minilua) must match the target pointer size.
-  # For 32-bit ARM targets, force a 32-bit HOST_CC.
-  if [[ "${host}" == "arm-linux-androideabi" ]]; then
+  # For 32-bit targets, force a 32-bit HOST_CC.
+  if [[ "${host}" == "arm-linux-androideabi" || "${host}" == "i686-linux-android" ]]; then
     export HOST_CC="gcc -m32"
   else
     export HOST_CC="gcc"
@@ -120,12 +126,39 @@ build_one() {
     --without-mysql \
     --without-pgsql \
     CK_CONFIGURE_FLAGS="${ck_configure_flags}" \
-      CFLAGS="${cflags} ${extra_cflags} -Os -fdata-sections -ffunction-sections" \
-    LDFLAGS="-static -Wl,--gc-sections"; then
+      CFLAGS="${cflags} ${extra_cflags} -Os -fdata-sections -ffunction-sections -fPIE" \
+    LDFLAGS="-Wl,--gc-sections -fPIE -pie"; then
     echo "configure failed for ${name}; tail of config.log:" >&2
     tail -n 120 config.log >&2 || true
     exit 1
   fi
+
+  local ck_tmp_dir="${bdir}/third_party/concurrency_kit/tmp"
+  rm -rf "${ck_tmp_dir}"
+  mkdir -p "${ck_tmp_dir}"
+  tar -C "${SRC_DIR}/third_party/concurrency_kit" -cf - ck | tar -xf - -C "${ck_tmp_dir}"
+  chmod -R u+w "${ck_tmp_dir}"
+  (cd "${ck_tmp_dir}/ck" && \
+    CC="${CC}" \
+    CFLAGS="${cflags} ${extra_cflags} -Os -fdata-sections -ffunction-sections -D_GNU_SOURCE" \
+    LDFLAGS="-static -Wl,--gc-sections" \
+    ./configure ${ck_configure_flags} --prefix="${bdir}/third_party/concurrency_kit" && \
+    make)
+  mkdir -p "${bdir}/third_party/concurrency_kit/lib" "${bdir}/third_party/concurrency_kit/include"
+  cp "${ck_tmp_dir}/ck/src/libck.a" "${bdir}/third_party/concurrency_kit/lib/libck.a"
+  cp "${ck_tmp_dir}/ck/include"/*.h "${bdir}/third_party/concurrency_kit/include"
+  cp -r "${ck_tmp_dir}/ck/include/gcc" "${bdir}/third_party/concurrency_kit/include/"
+  cp -r "${ck_tmp_dir}/ck/include/spinlock" "${bdir}/third_party/concurrency_kit/include/"
+  cat > "${bdir}/third_party/concurrency_kit/Makefile" <<'EOF'
+all:
+	@true
+
+install:
+	@true
+
+clean:
+	@true
+EOF
 
   if [[ "${host}" == "aarch64-linux-android" ]]; then
     python3 - <<'PY'
@@ -163,6 +196,9 @@ if assigned or inserted:
 PY
   fi
 
+  python3 -c 'from pathlib import Path; import re; path = Path("third_party/concurrency_kit/Makefile"); text = path.read_text(); text, count = re.subn(r"(?ms)make && \\\n(\s*)make install", r"make && \\\n\1touch src/libck.so && \\\n\1make install", text, count=1); path.write_text(text) if count else None'
+  python3 -c 'from pathlib import Path; import re; path = Path("third_party/concurrency_kit/Makefile"); text = path.read_text(); text, count = re.subn(r"(?ms)make && \\\n(\s*)make install", r"make && \\\ntouch src/libck.so && \\\nmake install", text, count=1); path.write_text(text) if count else None'
+
   # Build LuaJIT manually in the build tree, then replace the recursive
   # subdir Makefile with a trivial one so the top-level make does not recurse
   # into the broken wrapper recipe.
@@ -174,6 +210,7 @@ PY
   make -C "${luajit_tmp_dir}/luajit/src" \
     HOST_CC="${HOST_CC}" \
     CROSS="${host}-" \
+    XCFLAGS="-DLUAJIT_DISABLE_JIT" \
     TARGET_SYS=Other \
     TARGET_CFLAGS="${cflags}" \
     TARGET_LDFLAGS="-static -Wl,--gc-sections" \
@@ -192,7 +229,7 @@ clean:
 	@true
 EOF
 
-  make -j"${JOBS}"
+  make -j"${JOBS:-1}"
 
   cp -f src/sysbench "${OUT_DIR}/sysbench-${name}"
   "${STRIP}" "${OUT_DIR}/sysbench-${name}" || true
@@ -229,6 +266,15 @@ build_one \
   "arm-linux-androideabi" \
   "-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp"
 
+# x86
+build_one \
+  "x86" \
+  "x86" \
+  "android-16" \
+  "x86-4.9" \
+  "i686-linux-android" \
+  "-march=i686 -mtune=intel -mssse3 -mfpmath=sse"
+
 # aarch64
 build_one \
   "aarch64" \
@@ -237,6 +283,15 @@ build_one \
   "aarch64-linux-android-4.9" \
   "aarch64-linux-android" \
   "-march=armv8-a"
+
+# x86_64
+build_one \
+  "x86_64" \
+  "x86_64" \
+  "android-21" \
+  "x86_64-4.9" \
+  "x86_64-linux-android" \
+  "-march=x86-64"
 
 echo "\nArtifacts in ${OUT_DIR}:"
 ls -lh "${OUT_DIR}"/sysbench-*
