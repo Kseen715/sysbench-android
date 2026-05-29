@@ -1,0 +1,16 @@
+services:
+  sysbench-android-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      
+      args:
+        SYSBENCH_REF: master
+    image: sysbench-android-builder:latest
+    volumes:
+      - ./out:/out
+      - ./build-sysbench-android.sh:/work/build-sysbench-android.sh:ro
+    environment:
+      - JOBS=4
+      - OUT_DIR=/out
+    command: ["/bin/bash", "/work/build-sysbench-android.sh"]
