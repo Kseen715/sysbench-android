@@ -7,6 +7,8 @@ SRC_DIR="${SRC_DIR:-/work/sysbench}"
 NDK_DIR="${ANDROID_NDK_HOME:-/opt/android-ndk-r10e}"
 TOOLCHAIN_ROOT="${TOOLCHAIN_ROOT:-/work/toolchains}"
 BUILD_ROOT="${BUILD_ROOT:-/work/build}"
+# Comma-separated list of target names to build. Defaults to all targets.
+BUILD_TARGETS="${BUILD_TARGETS:-}"
 
 if [[ ! -x "${NDK_DIR}/build/tools/make-standalone-toolchain.sh" ]]; then
   echo "NDK toolchain helper not found at ${NDK_DIR}" >&2
@@ -50,6 +52,8 @@ sed -i 's/LDFLAGS="-m64 /LDFLAGS="/g' third_party/concurrency_kit/ck/configure
 # -static is in LDFLAGS (contradicts -shared -fPIC). Since sysbench only needs
 # the static archive, skip the shared library target entirely.
 sed -i 's/^all: \$(ALL_LIBS)$/all: libck.a/' third_party/concurrency_kit/ck/src/Makefile.in
+
+
 ./autogen.sh
 
 build_one() {
@@ -59,6 +63,8 @@ build_one() {
   local toolchain_name="$4"
   local host="$5"
   local cflags="$6"
+  local use_pie="${7:-yes}"
+  local use_static="${8:-no}"
 
   local tc_dir="${TOOLCHAIN_ROOT}/${name}"
   local bdir="${BUILD_ROOT}/${name}"
@@ -121,16 +127,31 @@ build_one() {
 
   pushd "${bdir}" >/dev/null
 
+  local pie_cflags="" pie_ldflags="" static_ldflags=""
+  if [[ "${use_pie}" == "yes" ]]; then
+    pie_cflags="-fPIE"
+    pie_ldflags="-fPIE -pie"
+  fi
+  # static linking via -all-static requires post-Makefile patching; skip for now
+
   if ! "${SRC_DIR}/configure" \
     --host="${host}" \
     --without-mysql \
     --without-pgsql \
     CK_CONFIGURE_FLAGS="${ck_configure_flags}" \
-      CFLAGS="${cflags} ${extra_cflags} -Os -fdata-sections -ffunction-sections -fPIE" \
-    LDFLAGS="-Wl,--gc-sections -fPIE -pie"; then
+      CFLAGS="${cflags} ${extra_cflags} -Os -fdata-sections -ffunction-sections ${pie_cflags}" \
+    LDFLAGS="-Wl,--gc-sections ${pie_ldflags} ${static_ldflags}"; then
     echo "configure failed for ${name}; tail of config.log:" >&2
     tail -n 120 config.log >&2 || true
     exit 1
+  fi
+
+  # Android < 4.1: bionic does not initialize the PT_TLS segment for non-PIE
+  # executables, so _Thread_local variables crash on first access. Strip the
+  # keyword so TLS vars become regular globals (safe: old device is single-core).
+  if [[ "${use_static}" == "yes" ]] && [[ -f config/config.h ]]; then
+    sed -i 's/^#define TLS .*/#define TLS /' config/config.h
+    echo "==> Patched config/config.h: TLS disabled for old-Android (${name})"
   fi
 
   local ck_tmp_dir="${bdir}/third_party/concurrency_kit/tmp"
@@ -210,8 +231,8 @@ PY
   make -C "${luajit_tmp_dir}/luajit/src" \
     HOST_CC="${HOST_CC}" \
     CROSS="${host}-" \
-    XCFLAGS="-DLUAJIT_DISABLE_JIT" \
-    TARGET_SYS=Other \
+    XCFLAGS="-DLUAJIT_DISABLE_JIT -DLUAJIT_USE_SYSMALLOC" \
+    TARGET_SYS=Linux \
     TARGET_CFLAGS="${cflags}" \
     TARGET_LDFLAGS="-static -Wl,--gc-sections" \
     libluajit.a
@@ -239,17 +260,31 @@ EOF
   file "${OUT_DIR}/sysbench-${name}"
 }
 
-# armv5 (armeabi legacy)
-build_one \
+_build_one() {
+  local name="$1"
+  # Skip if BUILD_TARGETS is set and this target is not in the list.
+  if [[ -n "${BUILD_TARGETS}" ]]; then
+    local t
+    for t in ${BUILD_TARGETS//,/ }; do
+      [[ "${t}" == "${name}" ]] && { build_one "$@"; return; }
+    done
+    echo "==> Skipping ${name} (not in BUILD_TARGETS)"
+    return
+  fi
+  build_one "$@"
+}
+
+# armv5 (armeabi legacy) — no -mthumb: LuaJIT assembly is ARM-mode only
+_build_one \
   "armv5" \
   "arm" \
   "android-16" \
   "arm-linux-androideabi-4.9" \
   "arm-linux-androideabi" \
-  "-march=armv5te -mthumb -msoft-float"
+  "-march=armv5te -msoft-float"
 
 # armv6
-build_one \
+_build_one \
   "armv6" \
   "arm" \
   "android-16" \
@@ -258,7 +293,7 @@ build_one \
   "-march=armv6 -mfpu=vfp -mfloat-abi=softfp"
 
 # armv7
-build_one \
+_build_one \
   "armv7" \
   "arm" \
   "android-16" \
@@ -266,8 +301,20 @@ build_one \
   "arm-linux-androideabi" \
   "-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp"
 
+# armv7-nopie: for Android < 4.1 (API < 16) — no PIE, statically linked
+# so it works regardless of the old device's shared library versions.
+_build_one \
+  "armv7-nopie" \
+  "arm" \
+  "android-14" \
+  "arm-linux-androideabi-4.9" \
+  "arm-linux-androideabi" \
+  "-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp" \
+  "no" \
+  "yes"
+
 # x86
-build_one \
+_build_one \
   "x86" \
   "x86" \
   "android-16" \
@@ -276,7 +323,7 @@ build_one \
   "-march=i686 -mtune=intel -mssse3 -mfpmath=sse"
 
 # aarch64
-build_one \
+_build_one \
   "aarch64" \
   "arm64" \
   "android-21" \
@@ -285,7 +332,7 @@ build_one \
   "-march=armv8-a"
 
 # x86_64
-build_one \
+_build_one \
   "x86_64" \
   "x86_64" \
   "android-21" \
