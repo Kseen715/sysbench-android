@@ -182,43 +182,10 @@ clean:
 EOF
 
   if [[ "${host}" == "aarch64-linux-android" ]]; then
-    python3 - <<'PY'
-from pathlib import Path
-import re
-
-path = Path("third_party/concurrency_kit/Makefile")
-text = path.read_text()
-
-# Prefer rewriting CK_CONFIGURE_FLAGS directly when the assignment is present.
-text, assigned = re.subn(
-    r'(?m)^CK_CONFIGURE_FLAGS\s*=.*$',
-    'CK_CONFIGURE_FLAGS = --profile=aarch64 --without-pic',
-    text,
-    count=1,
-)
-
-# Fallback for Makefiles that inline ./configure without CK_CONFIGURE_FLAGS.
-if assigned == 0 and "--profile=aarch64" not in text:
-    text, inserted = re.subn(
-        r'(?m)^(\s*\.\/configure)(\s*\\)$',
-        r'\1 --profile=aarch64 --without-pic\2',
-        text,
-        count=1,
-    )
-else:
-    inserted = 0
-
-# If arm profile leaked in, rewrite it for aarch64.
-text = text.replace("--profile=arm", "--profile=aarch64")
-path.write_text(text)
-
-if assigned or inserted:
-    print("patched CK configure recipe with aarch64 profile")
-PY
+    python3 /work/src/patch_ck_aarch64.py
   fi
 
-  python3 -c 'from pathlib import Path; import re; path = Path("third_party/concurrency_kit/Makefile"); text = path.read_text(); text, count = re.subn(r"(?ms)make && \\\n(\s*)make install", r"make && \\\n\1touch src/libck.so && \\\n\1make install", text, count=1); path.write_text(text) if count else None'
-  python3 -c 'from pathlib import Path; import re; path = Path("third_party/concurrency_kit/Makefile"); text = path.read_text(); text, count = re.subn(r"(?ms)make && \\\n(\s*)make install", r"make && \\\ntouch src/libck.so && \\\nmake install", text, count=1); path.write_text(text) if count else None'
+  python3 /work/src/patch_ck_libck_so.py
 
   # Build LuaJIT manually in the build tree, then replace the recursive
   # subdir Makefile with a trivial one so the top-level make does not recurse
@@ -340,5 +307,6 @@ _build_one \
   "x86_64-linux-android" \
   "-march=x86-64"
 
-echo "\nArtifacts in ${OUT_DIR}:"
+echo ""
+echo "Artifacts in ${OUT_DIR}:"
 ls -lh "${OUT_DIR}"/sysbench-*

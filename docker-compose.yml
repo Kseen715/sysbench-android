@@ -10,6 +10,7 @@ services:
     volumes:
       - ./out:/out
       - ./build-sysbench-android.sh:/work/build-sysbench-android.sh:ro
+      - ./src:/work/src:ro
     environment:
       - JOBS=
       - OUT_DIR=/out
