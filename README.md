@@ -34,6 +34,24 @@ adb shell 'cd /data/local/tmp; ./sysbench-armv7 memory --memory-block-size=1M ru
 
 From there you can run the tool with the arguments you need for your device.
 
+### Disk throughput test (no block device access needed)
+
+`disk-test.sh` mimics `hdparm -Tt` but works entirely in a local directory using `sysbench fileio`:
+
+```bash
+adb push disk-test.sh /data/local/tmp/
+adb push out/sysbench-armv7 /data/local/tmp/sysbench
+adb shell chmod 755 /data/local/tmp/disk-test.sh /data/local/tmp/sysbench
+adb shell 'cd /data/local/tmp; sh disk-test.sh ./sysbench . 512'
+```
+
+The script reports two numbers:
+
+- **Cached reads** — memory read throughput (sysbench `memory`, sequential)
+- **Disk reads** — sequential read from disk with `O_DIRECT` to bypass the OS page cache (sysbench `fileio seqrd`)
+
+The third argument controls the test file size in MB (default 512). Use a smaller value (e.g. 128) on devices with limited storage, or larger (e.g. 1024) to ensure the working set exceeds the disk's internal cache.
+
 ## Note
 
 The build is intended for Linux and Docker. The first run can take a while because it needs to download dependencies and the `sysbench` source code.
