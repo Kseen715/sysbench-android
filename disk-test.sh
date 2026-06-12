@@ -15,6 +15,47 @@ SYSBENCH="${1:-}"
 TEST_DIR="${2:-/data/local/tmp}"
 FILE_SIZE_MB="${3:-512}"
 
+# ---------- pure-shell parsers (no grep/sed/awk; works on Android 4.x toolbox) ----------
+# Extract "<num> MiB/sec" from a "... NNN MiB transferred (NNN MiB/sec)" line.
+parse_transferred() {
+    while IFS= read -r line; do
+        case "$line" in
+            *"MiB transferred"*\(*MiB/sec\)*)
+                line=${line#*\(}
+                line=${line%\)}
+                echo "$line"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+# Extract "<num> MiB/s" from a "read:  IOPS=NN NN MiB/s (NN MB/s)" line.
+parse_read_mbs() {
+    while IFS= read -r line; do
+        case "$line" in
+            *read:*IOPS=*)
+                line=${line#*IOPS=}
+                set -- $line
+                echo "$2 $3"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+# Return 0 if any line mentions an error/failure.
+has_error() {
+    while IFS= read -r line; do
+        case "$line" in
+            *[Ee]rror*|*[Ff]ailed*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # ---------- locate binary ----------
 if [ -z "$SYSBENCH" ]; then
     ARCH=$(uname -m)
@@ -48,7 +89,7 @@ MEM_OUTPUT=$("$SYSBENCH" memory \
     run 2>&1)
 
 # "512.00 MiB transferred (1602.59 MiB/sec)"
-MEM_MBS=$(echo "$MEM_OUTPUT" | grep 'MiB transferred' | grep -oE '[0-9]+\.[0-9]+ MiB/sec')
+MEM_MBS=$(echo "$MEM_OUTPUT" | parse_transferred)
 echo " Cached reads: ${MEM_MBS:-see raw output below}"
 [ -z "$MEM_MBS" ] && echo "$MEM_OUTPUT"
 echo ""
@@ -62,7 +103,7 @@ PREPARE_OUTPUT=$("$SYSBENCH" fileio \
     --file-block-size=1M \
     prepare 2>&1)
 
-if echo "$PREPARE_OUTPUT" | grep -qi "error\|failed"; then
+if echo "$PREPARE_OUTPUT" | has_error; then
     echo "Prepare failed:"
     echo "$PREPARE_OUTPUT"
     exit 1
@@ -82,6 +123,6 @@ RUN_OUTPUT=$("$SYSBENCH" fileio \
     cleanup >/dev/null 2>&1
 
 # "read:  IOPS=141.90 141.90 MiB/s (148.79 MB/s)"
-DISK_MBS=$(echo "$RUN_OUTPUT" | grep 'read:' | grep -oE '[0-9]+\.[0-9]+ MiB/s')
+DISK_MBS=$(echo "$RUN_OUTPUT" | parse_read_mbs)
 echo " Disk reads:   ${DISK_MBS:-see raw output below}"
 [ -z "$DISK_MBS" ] && echo "$RUN_OUTPUT"
